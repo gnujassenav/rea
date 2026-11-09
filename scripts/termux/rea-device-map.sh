@@ -15,8 +15,9 @@ Usage: rea-device-map.sh [options]
                          lists, whatever its state.
   --output <dir>         New or empty directory for the results.
                          Default: ./rea-device-map-<UTC timestamp>
-  --adb-only             Skip REA and save raw adb output instead. Use it
-                         when REA cannot start; the files are not REA Evidence.
+  --adb-only             Skip REA and save raw adb output instead; the files
+                         are not REA Evidence. The script also does this, and
+                         says so, when REA is missing or cannot start.
   --only <a,b,...>       Run only these collections.
   --skip <a,b,...>       Run every collection except these.
   --collections <dir>    Also load collections from this directory.
@@ -27,13 +28,13 @@ Usage: rea-device-map.sh [options]
 
 Environment:
   REA_BIN        Path of one executable that starts REA (no arguments).
-                 Default: this checkout's scripts/rea.mjs when built,
-                 otherwise `rea` from PATH.
+                 Default: scripts/rea.mjs of the repository copy this
+                 script is in, when it is built; otherwise `rea` from PATH.
   REA_ADB_PATH   Absolute path to adb. Default: adb from PATH.
 
 Exit codes:
   0  every step succeeded
-  1  a prerequisite is missing (adb, REA, a listed device, output dir)
+  1  a prerequisite is missing (adb, a listed device, output dir)
   2  invalid option
   3  the collection ran, but one or more steps failed; see SUMMARY.tsv
 EOF
@@ -163,29 +164,32 @@ fi
 
 rea=()
 use_rea=0
+rea_notice=""
 if ((adb_only == 0)); then
   if [[ -n "${REA_BIN:-}" ]]; then
     # One executable path, kept whole so a path with spaces still works.
     rea=("$REA_BIN")
   elif [[ -f "$repo_root/scripts/rea.mjs" && -d "$repo_root/dist" ]] &&
     command -v node >/dev/null 2>&1; then
+    # This script sits inside a built copy of the REA repository.
     rea=(node "$repo_root/scripts/rea.mjs")
   elif command -v rea >/dev/null 2>&1; then
     rea=(rea)
   else
-    cat >&2 <<'EOF'
-REA was not found. Build this checkout (npm ci && npm run build:termux), set
-REA_BIN, or rerun with --adb-only to save raw adb output instead.
-EOF
-    exit 1
+    rea_notice="REA was not found (no REA_BIN, no built repository copy, no rea on PATH)."
   fi
-  # Fail once, with REA's own message, instead of once per step.
-  if ! rea_error="$("${rea[@]}" --version 2>&1 >/dev/null)"; then
-    printf 'REA did not start (%s --version):\n%s\n' "${rea[*]}" "$rea_error" >&2
-    printf 'Fix the build or REA_BIN, or rerun with --adb-only.\n' >&2
-    exit 1
+  # Start REA once. If it cannot start, say why and continue with raw adb
+  # instead of stopping or failing every step.
+  if ((${#rea[@]} > 0)); then
+    if rea_error="$("${rea[@]}" --version 2>&1 >/dev/null)"; then
+      use_rea=1
+    else
+      rea_notice="REA did not start (${rea[*]} --version): $rea_error"
+    fi
   fi
-  use_rea=1
+  if ((use_rea == 0)); then
+    printf '%s\nContinuing with raw adb output, which is not REA Evidence.\n' "$rea_notice" >&2
+  fi
 fi
 
 # List every row adb reports. A row is tried whatever its state: the state
@@ -408,6 +412,9 @@ for serial in "${serials[@]}"; do
 done
 
 printf '\nSummary: %s\n' "$summary"
+if [[ -n "$rea_notice" ]]; then
+  printf 'REA was not used: %s\n' "$rea_notice" >&2
+fi
 if ((failures > 0)); then
   printf '%s step(s) failed; their output is under %s/failures.\n' "$failures" "$output" >&2
   exit 3

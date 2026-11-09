@@ -144,9 +144,11 @@ A failed step publishes nothing under `devices/`, `termux/` or `adb-client/`.
 Its output, including REA's error result, and its stderr move to `failures/`.
 
 The script exits `0` when every step succeeded, `1` when a prerequisite is
-missing (adb, REA, any listed device or an empty output directory), `2` for an
+missing (adb, any listed device or an empty output directory), `2` for an
 invalid option, and `3` when the collection ran but a step failed. Before the
-first step it starts REA once and stops with REA's own message if that fails.
+first step it starts REA once. If REA is missing or cannot start, it prints the
+reason and continues with raw adb output for every collection; the `source`
+column of `SUMMARY.tsv` shows which was used.
 
 ### Options
 
