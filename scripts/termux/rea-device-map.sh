@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
 # Collect a read-only map of the Android device this Termux session runs on.
 #
-# Every step is a read: REA's read-kind ADB operations, or with --adb-only the
-# device commands those operations wrap. Nothing is installed, pushed, started
-# or stopped. See docs/guides/android/termux-on-device.md.
+# Every step is a read: REA's read-kind ADB operations, or raw device and
+# Termux commands for facts REA has no operation for. Nothing is installed,
+# pushed, started or stopped. See docs/guides/android/termux-on-device.md.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage: rea-device-map.sh [options]
 
-  --serial <serial>   Device serial exactly as `adb devices` reports it.
-                      Required when more than one device is connected.
-  --output <dir>      New or empty directory for the results.
-                      Default: ./rea-device-map-<UTC timestamp>
-  --adb-only          Skip REA and save raw adb output instead. Use it when
-                      REA cannot start; the files are not REA Evidence.
-  --usage-stats       Also save raw `dumpsys usagestats` (per-app usage
-                      history). REA has no operation for it, so this file is
-                      raw adb output even without --adb-only.
-  --help              Show this help.
+  --serial <serial>      Try only this serial, exactly as `adb devices`
+                         reports it. Repeatable. Default: every row adb
+                         lists, whatever its state.
+  --output <dir>         New or empty directory for the results.
+                         Default: ./rea-device-map-<UTC timestamp>
+  --adb-only             Skip REA and save raw adb output instead. Use it
+                         when REA cannot start; the files are not REA Evidence.
+  --only <a,b,...>       Run only these collections.
+  --skip <a,b,...>       Run every collection except these.
+  --collections <dir>    Also load collections from this directory.
+                         Repeatable. A later file replaces an earlier one
+                         with the same name.
+  --list                 List the available collections and exit.
+  --help                 Show this help.
 
 Environment:
   REA_BIN        Path of one executable that starts REA (no arguments).
@@ -29,7 +33,7 @@ Environment:
 
 Exit codes:
   0  every step succeeded
-  1  a prerequisite is missing (adb, REA, a connected device, output dir)
+  1  a prerequisite is missing (adb, REA, a listed device, output dir)
   2  invalid option
   3  the collection ran, but one or more steps failed; see SUMMARY.tsv
 EOF
@@ -44,15 +48,21 @@ need_value() {
   fi
 }
 
-serial=""
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+
+serials=()
 output=""
 adb_only=0
-usage_stats=0
+only=""
+skip=""
+list_only=0
+collection_dirs=("$script_dir/collections")
 while (($# > 0)); do
   case "$1" in
     --serial)
       need_value "$1" "$#"
-      serial="$2"
+      serials+=("$2")
       shift 2
       ;;
     --output)
@@ -60,12 +70,27 @@ while (($# > 0)); do
       output="$2"
       shift 2
       ;;
+    --only)
+      need_value "$1" "$#"
+      only="$2"
+      shift 2
+      ;;
+    --skip)
+      need_value "$1" "$#"
+      skip="$2"
+      shift 2
+      ;;
+    --collections)
+      need_value "$1" "$#"
+      collection_dirs+=("$2")
+      shift 2
+      ;;
     --adb-only)
       adb_only=1
       shift
       ;;
-    --usage-stats)
-      usage_stats=1
+    --list)
+      list_only=1
       shift
       ;;
     --help | -h)
@@ -80,6 +105,55 @@ while (($# > 0)); do
   esac
 done
 
+# Collections are *.sh files; the file name without .sh is the collection name.
+declare -A collection_file=()
+collection_names=()
+for dir in "${collection_dirs[@]}"; do
+  if [[ ! -d "$dir" ]]; then
+    printf 'Collections directory not found: %s\n' "$dir" >&2
+    exit 1
+  fi
+  for file in "$dir"/*.sh; do
+    [[ -f "$file" ]] || continue
+    name="$(basename "$file" .sh)"
+    [[ -n "${collection_file[$name]:-}" ]] || collection_names+=("$name")
+    collection_file[$name]="$file"
+  done
+done
+if ((${#collection_names[@]} == 0)); then
+  printf 'No collections found in: %s\n' "${collection_dirs[*]}" >&2
+  exit 1
+fi
+
+if ((list_only == 1)); then
+  for name in "${collection_names[@]}"; do
+    # The second line of a collection file is its one-line description.
+    printf '%-12s %s\n' "$name" "$(sed -n '2s/^# *//p' "${collection_file[$name]}")"
+  done
+  exit 0
+fi
+
+# in_list <name> <comma list>
+in_list() {
+  [[ ",$2," == *",$1,"* ]]
+}
+selected=()
+for requested in ${only//,/ } ${skip//,/ }; do
+  if [[ -z "${collection_file[$requested]:-}" ]]; then
+    printf 'Unknown collection: %s. Available: %s\n' "$requested" "${collection_names[*]}" >&2
+    exit 2
+  fi
+done
+for name in "${collection_names[@]}"; do
+  if [[ -n "$only" ]] && ! in_list "$name" "$only"; then continue; fi
+  if [[ -n "$skip" ]] && in_list "$name" "$skip"; then continue; fi
+  selected+=("$name")
+done
+if ((${#selected[@]} == 0)); then
+  printf 'No collection is selected.\n' >&2
+  exit 2
+fi
+
 # Prerequisites are reported, never installed.
 adb_bin="${REA_ADB_PATH:-adb}"
 if ! command -v "$adb_bin" >/dev/null 2>&1; then
@@ -87,8 +161,8 @@ if ! command -v "$adb_bin" >/dev/null 2>&1; then
   exit 1
 fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 rea=()
+use_rea=0
 if ((adb_only == 0)); then
   if [[ -n "${REA_BIN:-}" ]]; then
     # One executable path, kept whole so a path with spaces still works.
@@ -111,52 +185,35 @@ EOF
     printf 'Fix the build or REA_BIN, or rerun with --adb-only.\n' >&2
     exit 1
   fi
+  use_rea=1
 fi
 
-# Resolve the device. Only a serial in state `device` can answer.
+# List every row adb reports. A row is tried whatever its state: the state
+# column is adb's own label, and a row that cannot answer fails its steps.
 if ! devices_output="$("$adb_bin" devices 2>&1)"; then
   printf 'adb devices failed:\n%s\n' "$devices_output" >&2
   exit 1
 fi
+declare -A listed_state=()
+listed=()
 # Rows follow the header line; adb may print daemon notices before it.
-mapfile -t ready < <(printf '%s\n' "$devices_output" | tr -d '\r' |
-  awk 'seen && $2 == "device" { print $1 } /^List of devices attached/ { seen = 1 }')
-mapfile -t not_ready < <(printf '%s\n' "$devices_output" | tr -d '\r' |
-  awk 'seen && NF >= 2 && $2 != "device" { print $1 " (" $2 ")" }
-    /^List of devices attached/ { seen = 1 }')
-if [[ -z "$serial" ]]; then
-  if ((${#ready[@]} == 0)); then
-    if ((${#not_ready[@]} > 0)); then
-      printf 'adb lists these, but none is in state "device":\n' >&2
-      printf '  %s\n' "${not_ready[@]}" >&2
-    fi
+while IFS=$'\t' read -r row_serial row_state; do
+  [[ -n "$row_serial" ]] || continue
+  listed+=("$row_serial")
+  listed_state[$row_serial]="$row_state"
+done < <(printf '%s\n' "$devices_output" | tr -d '\r' |
+  awk 'seen && NF >= 2 { print $1 "\t" $2 } /^List of devices attached/ { seen = 1 }')
+
+if ((${#serials[@]} == 0)); then
+  if ((${#listed[@]} == 0)); then
     cat >&2 <<'EOF'
-No device is ready. Pair and connect Wireless debugging first:
+adb lists no device. Pair and connect Wireless debugging first:
   adb pair localhost:<pairing port>
   adb connect localhost:<connect port>
 EOF
     exit 1
   fi
-  if ((${#ready[@]} > 1)); then
-    printf 'More than one device is connected; pass --serial. Found:\n' >&2
-    printf '  %s\n' "${ready[@]}" >&2
-    cat >&2 <<'EOF'
-After pairing, adb can list the same phone twice: once as localhost:<port>
-and once under an adb-...._adb-tls-connect._tcp name. Either serial works.
-EOF
-    exit 1
-  fi
-  serial="${ready[0]}"
-else
-  found=0
-  for candidate in "${ready[@]}"; do
-    [[ "$candidate" == "$serial" ]] && found=1
-  done
-  if ((found == 0)); then
-    printf 'Serial %s is not connected in state "device". Connected:\n' "$serial" >&2
-    printf '  %s\n' "${ready[@]:-(none)}" >&2
-    exit 1
-  fi
+  serials=("${listed[@]}")
 fi
 
 if [[ -z "$output" ]]; then
@@ -170,69 +227,118 @@ mkdir -p "$output"
 chmod 700 "$output"
 
 summary="$output/SUMMARY.tsv"
-printf 'step\tsource\texit_code\tfile\n' >"$summary"
+printf 'target\tadb_state\tcollection\tstep\tsource\texit_code\tfile\n' >"$summary"
 failures=0
+partial="$output/.partial"
 
-# record <step> <source> <file> <command...>: run one read, keep going on failure.
+# Set per target before its collections run.
+target=""
+target_dir=""
+target_state=""
+collection=""
+serial=""
+declare -A local_done=()
+
+# record <relative dir> <step> <source> <file> <command...>
+# A step that succeeds publishes its file. A step that fails publishes nothing
+# under the results: its output and stderr move to failures/ instead.
 record() {
-  local step="$1" source="$2" file="$3" code=0
-  shift 3
-  "$@" >"$output/$file" 2>"$output/$file.stderr" || code=$?
-  [[ -s "$output/$file.stderr" ]] || rm -f "$output/$file.stderr"
-  printf '%s\t%s\t%s\t%s\n' "$step" "$source" "$code" "$file" >>"$summary"
-  if ((code != 0)); then
-    failures=$((failures + 1))
-    printf '  failed (%s): %s\n' "$code" "$step" >&2
+  local dir="$1" step="$2" source="$3" file="$4" code=0 dest
+  shift 4
+  "$@" >"$partial" 2>"$partial.stderr" || code=$?
+  if ((code == 0)); then
+    dest="$dir"
   else
-    printf '  ok: %s\n' "$step"
+    dest="failures/$dir"
+    failures=$((failures + 1))
+  fi
+  mkdir -p "$output/$dest"
+  local saved="$dest/$file"
+  if ((code != 0)) && [[ ! -s "$partial" ]]; then
+    # A failed step that printed nothing leaves only its stderr, if any.
+    rm -f "$partial"
+    saved="-"
+  else
+    mv "$partial" "$output/$dest/$file"
+  fi
+  if [[ -s "$partial.stderr" ]]; then
+    mv "$partial.stderr" "$output/$dest/$file.stderr"
+    [[ "$saved" != "-" ]] || saved="$dest/$file.stderr"
+  else
+    rm -f "$partial.stderr"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$target" "$target_state" \
+    "$collection" "$step" "$source" "$code" "$saved" >>"$summary"
+  if ((code == 0)); then
+    printf '  ok: %s/%s\n' "$collection" "$step"
+  else
+    printf '  failed (%s): %s/%s\n' "$code" "$collection" "$step" >&2
   fi
 }
 
+# Helpers for collection files.
+
+# rea_step <step> <rea command and arguments...>: one REA operation, saved as
+# Evidence JSON. Pass "$serial" yourself where the operation takes one.
 rea_step() {
   local step="$1"
   shift
-  record "$step" rea "$step.json" "${rea[@]}" "$@" --format json
+  record "$target_dir" "$step" rea "$step.json" "${rea[@]}" "$@" --format json
 }
 
+# adb_step <step> <device shell words...>: one device shell command. Pass a
+# single string to run a pipeline in the device's shell.
 adb_step() {
   local step="$1"
   shift
-  record "$step" adb "$step.txt" "$adb_bin" -s "$serial" shell "$@"
+  record "$target_dir" "$step" adb "$step.txt" "$adb_bin" -s "$serial" shell "$@"
 }
 
-printf 'Device: %s\nOutput: %s\n' "$serial" "$output"
+# local_step <step> <command...>: one command in this Termux session. It runs
+# once per collection run, not once per device.
+local_step() {
+  local step="$1" saved_target="$target" saved_state="$target_state"
+  shift
+  [[ -z "${local_done[$collection/$step]:-}" ]] || return 0
+  local_done[$collection/$step]=1
+  target="termux"
+  target_state="local"
+  record "termux" "$step" termux "$step.txt" "$@"
+  target="$saved_target"
+  target_state="$saved_state"
+}
 
-if ((adb_only == 0)); then
+printf 'Output: %s\nCollections: %s\n' "$output" "${selected[*]}"
+
+target="adb-client"
+target_state="local"
+target_dir="adb-client"
+collection="client"
+if ((use_rea == 1)); then
   rea_step inspect-adb-client inspect-adb-client
   rea_step list-adb-devices list-adb-devices
-  rea_step inspect-adb-device inspect-adb-device "$serial"
-  rea_step inspect-adb-display inspect-adb-display "$serial"
-  rea_step list-adb-features list-adb-features "$serial"
-  rea_step list-adb-services list-adb-services "$serial"
-  rea_step list-adb-packages-third-party list-adb-packages "$serial" --scope third_party
-  rea_step list-adb-packages-system list-adb-packages "$serial" --scope system
-  rea_step list-adb-processes list-adb-processes "$serial"
-  rea_step inspect-adb-window inspect-adb-window "$serial"
 else
-  record adb-version adb adb-version.txt "$adb_bin" version
-  record adb-devices adb adb-devices.txt "$adb_bin" devices -l
-  adb_step getprop getprop
-  adb_step wm-size wm size
-  adb_step wm-density wm density
-  adb_step pm-list-features pm list features
-  adb_step service-list service list
-  adb_step pm-list-packages-third-party pm list packages -f -3
-  adb_step pm-list-packages-system pm list packages -f -s
-  adb_step ps ps -A
-  adb_step dumpsys-window dumpsys window
+  record "$target_dir" adb-version adb adb-version.txt "$adb_bin" version
+  record "$target_dir" adb-devices adb adb-devices.txt "$adb_bin" devices -l
 fi
 
-if ((usage_stats == 1)); then
-  adb_step dumpsys-usagestats dumpsys usagestats
-fi
+index=0
+for serial in "${serials[@]}"; do
+  index=$((index + 1))
+  target="$serial"
+  target_state="${listed_state[$serial]:-not-listed}"
+  # Serials can hold characters a directory name should not.
+  target_dir="devices/$index-$(printf '%s' "$serial" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '\nDevice %s of %s: %s (adb state: %s)\n' "$index" "${#serials[@]}" \
+    "$serial" "$target_state"
+  for collection in "${selected[@]}"; do
+    # shellcheck source=/dev/null
+    source "${collection_file[$collection]}"
+  done
+done
 
 printf '\nSummary: %s\n' "$summary"
 if ((failures > 0)); then
-  printf '%s step(s) failed; the file of each failed step, or its .stderr, holds the reason.\n' "$failures" >&2
+  printf '%s step(s) failed; their output is under %s/failures.\n' "$failures" "$output" >&2
   exit 3
 fi
