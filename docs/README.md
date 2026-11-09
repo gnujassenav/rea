@@ -49,6 +49,7 @@ product pages. The VitePress documentation source is this `docs/` tree.
 - [Static Android APK analysis](guides/android/android-analysis.md)
 - [Apktool resource decoding](guides/android/apktool-resource-analysis.md)
 - [ADB device inspection and acquisition](guides/android/adb-device-analysis.md)
+- [On-device inspection from Termux](guides/android/termux-on-device.md)
 - [Flutter build identification](guides/android/flutter-analysis.md)
 
 ## Apple applications

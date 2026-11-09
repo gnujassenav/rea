@@ -179,6 +179,11 @@ export const documentationSections = [
         route: "/adb-device-analysis",
       },
       {
+        text: "On-device inspection from Termux",
+        source: "guides/android/termux-on-device.md",
+        route: "/termux-on-device",
+      },
+      {
         text: "Flutter build identification",
         source: "guides/android/flutter-analysis.md",
         route: "/flutter-analysis",
