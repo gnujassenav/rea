@@ -106,17 +106,29 @@ steps save command output as text: they carry no provenance, limitations or
 parsing and are not REA Evidence. With `--adb-only`, the first three
 collections also use raw adb.
 
-What the raw collections can and cannot establish:
+Every published byte is the output of a command that ran in that invocation.
+The script writes no placeholder, default or remembered result, keeps no cache,
+and refuses an output directory that already holds files.
 
+How to read the raw collections:
+
+- A probe file ends with one line, `rea-device-map-exit=<n>`: the real exit code
+  of the probed command. For `command -v <tool>`, output plus `0` means the tool
+  was found; no output and a non-zero code means it was not. A probe whose
+  output lacks that line did not get an answer from the device and is recorded
+  as failed.
+- A `postgres-*` file holds the lines of the neighbouring `all-processes.txt` or
+  `all-packages.txt` that name PostgreSQL. Exit code `1` in `SUMMARY.tsv` and an
+  empty file mean no line matched; the complete source file is saved beside it.
+  Listening ports are not checked, because Android does not let the adb shell
+  user list other apps' sockets.
 - `sqlite`: the adb shell user cannot read other apps' private databases.
   `dumpsys dbinfo` reports only what the system exposes for running apps.
-- `postgresql`: `none-observed` means no matching process or package name was
-  seen. Listening ports are not checked, because Android does not let the adb
-  shell user list other apps' sockets.
-- `kotlin`: `kotlin-marker` shows the APK contains Kotlin entries.
-  `no-kotlin-marker` does not show Kotlin is absent, because shrinkers can
-  remove those entries. `unknown` is reported when the APK or `unzip` is
-  unavailable.
+- `kotlin`: for each third-party APK the file holds a header line, the archive
+  entries under `kotlin/` or named `*.kotlin_module` exactly as `unzip` lists
+  them, and `unzip-exit=<n>`. Listed entries show Kotlin was used. No entries do
+  not show Kotlin is absent, because shrinkers can remove them, and a non-zero
+  `unzip-exit` means the APK could not be listed.
 
 ### Results
 
@@ -156,9 +168,14 @@ second line is the description `--list` prints. The script sources it once per
 device with these helpers and variables:
 
 - `rea_step <step> <rea command…>` runs one REA operation and saves its JSON.
-- `adb_step <step> <shell words…>` runs one device shell command. Pass a single
-  string to run a pipeline in the device's shell.
-- `local_step <step> <command…>` runs one command in Termux, once per run.
+- `adb_step <step> <shell words…>` runs one device shell command; a non-zero
+  exit is a failure.
+- `adb_probe_step <step> <shell string>` runs a device command whose non-zero
+  exit is an answer, and appends the exit trailer.
+- `match_step <step> <published file> <regex>` saves the matching lines of a
+  file this device already published.
+- `local_step`, `local_probe_step` and `local_match_step` do the same in Termux,
+  once per run.
 - `$serial` is the current row's serial; `$use_rea` is `1` unless `--adb-only`.
 
 ```sh
@@ -167,9 +184,8 @@ device with these helpers and variables:
 adb_step dumpsys-battery dumpsys battery
 ```
 
-Keep collections read-only. A step that exits non-zero is recorded as failed,
-so end a filter that may match nothing with an explicit marker, for example
-`grep … || echo none-observed`.
+Keep collections read-only, and never print a verdict the command did not
+produce: save the command's own output and let its exit code speak.
 
 To look closer at one app, continue with the ADB guide's package operations,
 for example `inspect-adb-package` and `pull-adb-package`.

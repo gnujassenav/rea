@@ -239,14 +239,28 @@ collection=""
 serial=""
 declare -A local_done=()
 
+# Marks the end of a probe's output with the probed command's real exit code.
+exit_trailer='rea-device-map-exit='
+
 # record <relative dir> <step> <source> <file> <command...>
-# A step that succeeds publishes its file. A step that fails publishes nothing
-# under the results: its output and stderr move to failures/ instead.
+# Every published byte comes from the command that ran in this invocation; the
+# script writes no placeholder, default or remembered result. A step that
+# succeeds publishes its file. A step that fails publishes nothing under the
+# results: its output and stderr move to failures/ instead.
+#   ok_codes         exit codes that count as success (default "0")
+#   require_trailer  1 when the output must end with the exit trailer
 record() {
   local dir="$1" step="$2" source="$3" file="$4" code=0 dest
   shift 4
+  rm -f "$partial" "$partial.stderr"
   "$@" >"$partial" 2>"$partial.stderr" || code=$?
-  if ((code == 0)); then
+  if [[ "${require_trailer:-0}" == 1 ]] && ((code == 0)) &&
+    ! tail -n 1 "$partial" | grep -q -E "^${exit_trailer}[0-9]+\$"; then
+    # The transport ended before the probed command reported its exit code.
+    printf 'rea-device-map: output ended without the exit trailer\n' >>"$partial.stderr"
+    code=125
+  fi
+  if in_list "$code" "${ok_codes:-0}"; then
     dest="$dir"
   else
     dest="failures/$dir"
@@ -254,7 +268,7 @@ record() {
   fi
   mkdir -p "$output/$dest"
   local saved="$dest/$file"
-  if ((code != 0)) && [[ ! -s "$partial" ]]; then
+  if [[ "$dest" == failures/* && ! -s "$partial" ]]; then
     # A failed step that printed nothing leaves only its stderr, if any.
     rm -f "$partial"
     saved="-"
@@ -269,10 +283,12 @@ record() {
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$target" "$target_state" \
     "$collection" "$step" "$source" "$code" "$saved" >>"$summary"
-  if ((code == 0)); then
+  if [[ "$dest" == failures/* ]]; then
+    printf '  failed (%s): %s/%s\n' "$code" "$collection" "$step" >&2
+  elif ((code == 0)); then
     printf '  ok: %s/%s\n' "$collection" "$step"
   else
-    printf '  failed (%s): %s/%s\n' "$code" "$collection" "$step" >&2
+    printf '  ok (exit %s): %s/%s\n' "$code" "$collection" "$step"
   fi
 }
 
@@ -294,18 +310,72 @@ adb_step() {
   record "$target_dir" "$step" adb "$step.txt" "$adb_bin" -s "$serial" shell "$@"
 }
 
+# adb_probe_step <step> <device shell string>: a device command whose non-zero
+# exit is an answer, not a failure (a tool that is absent, a search that hits
+# an unreadable directory). The file holds the command's output followed by
+# one trailer line with its real exit code. A missing trailer means the device
+# did not answer, and the step fails.
+adb_probe_step() {
+  local step="$1" probe="$2"
+  require_trailer=1 record "$target_dir" "$step" adb "$step.txt" \
+    "$adb_bin" -s "$serial" shell "$probe"$'\n'"echo \"${exit_trailer}\$?\""
+}
+
+# match_step <step> <published file of this device> <extended regex>: the
+# lines of an already published file that match, case-insensitively. Exit
+# code 1 means no line matched and publishes an empty file.
+match_step() {
+  match_in "$target_dir" "$@"
+}
+
+# run_local <function> <arguments...>: record under termux/, once per run.
+run_local() {
+  local saved_target="$target" saved_state="$target_state"
+  [[ -z "${local_done[$collection/$2]:-}" ]] || return 0
+  local_done[$collection/$2]=1
+  target="termux"
+  target_state="local"
+  "$@"
+  target="$saved_target"
+  target_state="$saved_state"
+}
+
 # local_step <step> <command...>: one command in this Termux session. It runs
 # once per collection run, not once per device.
 local_step() {
-  local step="$1" saved_target="$target" saved_state="$target_state"
+  run_local local_record "$@"
+}
+local_record() {
+  local step="$1"
   shift
-  [[ -z "${local_done[$collection/$step]:-}" ]] || return 0
-  local_done[$collection/$step]=1
-  target="termux"
-  target_state="local"
   record "termux" "$step" termux "$step.txt" "$@"
-  target="$saved_target"
-  target_state="$saved_state"
+}
+
+# local_probe_step <step> <shell string>: adb_probe_step for this Termux session.
+local_probe_step() {
+  run_local local_probe_record "$@"
+}
+local_probe_record() {
+  require_trailer=1 record "termux" "$1" termux "$1.txt" \
+    sh -c "$2"$'\n'"echo \"${exit_trailer}\$?\""
+}
+
+# local_match_step <step> <published termux file> <extended regex>
+local_match_step() {
+  run_local match_in "termux" "$@"
+}
+
+# match_in <relative dir> <step> <published file> <extended regex>
+match_in() {
+  local dir="$1" step="$2" from="$3" pattern="$4"
+  if [[ ! -f "$output/$dir/$from" ]]; then
+    # shellcheck disable=SC2016
+    record "$dir" "$step" derived "$step.txt" \
+      sh -c 'echo "source file was not published: $1" >&2; exit 2' sh "$from"
+    return 0
+  fi
+  ok_codes="0,1" record "$dir" "$step" derived "$step.txt" \
+    grep -i -E -e "$pattern" "$output/$dir/$from"
 }
 
 printf 'Output: %s\nCollections: %s\n' "$output" "${selected[*]}"
