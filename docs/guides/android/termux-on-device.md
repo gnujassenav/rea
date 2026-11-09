@@ -97,7 +97,7 @@ The script selects the single connected device, or the one named with
 
 Every step is a read-kind operation; nothing is installed, pushed, started or
 stopped. Each REA step saves the full Evidence JSON. `SUMMARY.tsv` records each
-step's source, exit code and file, and a failed step leaves a `.stderr` file
+step's source, exit code and file, and a failed step keeps its reason in its own file or a `.stderr` file beside it,
 while the remaining steps still run.
 
 Options:

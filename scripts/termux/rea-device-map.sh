@@ -233,6 +233,6 @@ fi
 
 printf '\nSummary: %s\n' "$summary"
 if ((failures > 0)); then
-  printf '%s step(s) failed; their .stderr files hold the reason.\n' "$failures" >&2
+  printf '%s step(s) failed; the file of each failed step, or its .stderr, holds the reason.\n' "$failures" >&2
   exit 3
 fi
