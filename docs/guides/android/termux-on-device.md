@@ -52,7 +52,9 @@ pkg install android-tools nodejs-lts npm git termux-exec
    adb devices
    ```
 
-The device must be listed in state `device`. Its serial is the
+The device must be listed in state `device`. After pairing, adb may list the
+same device a second time under an `adb-…._adb-tls-connect._tcp` name; either
+serial works. Its serial is the
 `localhost:<connect port>` value exactly as `adb devices` prints it. The connect
 port changes whenever Wireless debugging restarts; pairing is kept.
 
@@ -109,7 +111,12 @@ Options:
   history. REA has no operation for it, so this file is raw adb output in
   either mode.
 
-`REA_BIN` overrides the REA command, and `REA_ADB_PATH` selects the adb binary
+The script exits `0` when every step succeeded, `1` when a prerequisite is
+missing (adb, REA, a ready device or an empty output directory), `2` for an
+invalid option, and `3` when the collection ran but a step failed. Before the
+first step it starts REA once and stops with REA's own message if that fails.
+
+`REA_BIN` names one executable that starts REA, and `REA_ADB_PATH` selects the adb binary
 as described in the [ADB guide](adb-device-analysis.md#supply-tools).
 
 To look closer at one app, continue with the ADB guide's package operations,

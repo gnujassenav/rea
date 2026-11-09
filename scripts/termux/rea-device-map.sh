@@ -22,10 +22,26 @@ Usage: rea-device-map.sh [options]
   --help              Show this help.
 
 Environment:
-  REA_BIN        Command that starts REA. Default: this checkout's
-                 scripts/rea.mjs when built, otherwise `rea` from PATH.
+  REA_BIN        Path of one executable that starts REA (no arguments).
+                 Default: this checkout's scripts/rea.mjs when built,
+                 otherwise `rea` from PATH.
   REA_ADB_PATH   Absolute path to adb. Default: adb from PATH.
+
+Exit codes:
+  0  every step succeeded
+  1  a prerequisite is missing (adb, REA, a connected device, output dir)
+  2  invalid option
+  3  the collection ran, but one or more steps failed; see SUMMARY.tsv
 EOF
+}
+
+# need_value <option> <argument count>: an option's value must follow it.
+need_value() {
+  if (($2 < 2)); then
+    printf 'Option %s needs a value.\n\n' "$1" >&2
+    usage >&2
+    exit 2
+  fi
 }
 
 serial=""
@@ -35,11 +51,13 @@ usage_stats=0
 while (($# > 0)); do
   case "$1" in
     --serial)
-      serial="${2:?--serial needs a value}"
+      need_value "$1" "$#"
+      serial="$2"
       shift 2
       ;;
     --output)
-      output="${2:?--output needs a value}"
+      need_value "$1" "$#"
+      output="$2"
       shift 2
       ;;
     --adb-only)
@@ -73,9 +91,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 rea=()
 if ((adb_only == 0)); then
   if [[ -n "${REA_BIN:-}" ]]; then
-    # REA_BIN is the caller's command line, split on spaces by intent.
-    read -r -a rea <<<"$REA_BIN"
-  elif [[ -d "$repo_root/dist" ]] &&
+    # One executable path, kept whole so a path with spaces still works.
+    rea=("$REA_BIN")
+  elif [[ -f "$repo_root/scripts/rea.mjs" && -d "$repo_root/dist" ]] &&
     command -v node >/dev/null 2>&1; then
     rea=(node "$repo_root/scripts/rea.mjs")
   elif command -v rea >/dev/null 2>&1; then
@@ -87,14 +105,33 @@ REA_BIN, or rerun with --adb-only to save raw adb output instead.
 EOF
     exit 1
   fi
+  # Fail once, with REA's own message, instead of once per step.
+  if ! rea_error="$("${rea[@]}" --version 2>&1 >/dev/null)"; then
+    printf 'REA did not start (%s --version):\n%s\n' "${rea[*]}" "$rea_error" >&2
+    printf 'Fix the build or REA_BIN, or rerun with --adb-only.\n' >&2
+    exit 1
+  fi
 fi
 
 # Resolve the device. Only a serial in state `device` can answer.
-mapfile -t ready < <("$adb_bin" devices | awk 'NR > 1 && $2 == "device" { print $1 }')
+if ! devices_output="$("$adb_bin" devices 2>&1)"; then
+  printf 'adb devices failed:\n%s\n' "$devices_output" >&2
+  exit 1
+fi
+# Rows follow the header line; adb may print daemon notices before it.
+mapfile -t ready < <(printf '%s\n' "$devices_output" | tr -d '\r' |
+  awk 'seen && $2 == "device" { print $1 } /^List of devices attached/ { seen = 1 }')
+mapfile -t not_ready < <(printf '%s\n' "$devices_output" | tr -d '\r' |
+  awk 'seen && NF >= 2 && $2 != "device" { print $1 " (" $2 ")" }
+    /^List of devices attached/ { seen = 1 }')
 if [[ -z "$serial" ]]; then
   if ((${#ready[@]} == 0)); then
+    if ((${#not_ready[@]} > 0)); then
+      printf 'adb lists these, but none is in state "device":\n' >&2
+      printf '  %s\n' "${not_ready[@]}" >&2
+    fi
     cat >&2 <<'EOF'
-No device is connected. Pair and connect Wireless debugging first:
+No device is ready. Pair and connect Wireless debugging first:
   adb pair localhost:<pairing port>
   adb connect localhost:<connect port>
 EOF
@@ -103,6 +140,10 @@ EOF
   if ((${#ready[@]} > 1)); then
     printf 'More than one device is connected; pass --serial. Found:\n' >&2
     printf '  %s\n' "${ready[@]}" >&2
+    cat >&2 <<'EOF'
+After pairing, adb can list the same phone twice: once as localhost:<port>
+and once under an adb-...._adb-tls-connect._tcp name. Either serial works.
+EOF
     exit 1
   fi
   serial="${ready[0]}"
@@ -112,7 +153,8 @@ else
     [[ "$candidate" == "$serial" ]] && found=1
   done
   if ((found == 0)); then
-    printf 'Serial %s is not connected in state `device`.\n' "$serial" >&2
+    printf 'Serial %s is not connected in state "device". Connected:\n' "$serial" >&2
+    printf '  %s\n' "${ready[@]:-(none)}" >&2
     exit 1
   fi
 fi
@@ -192,5 +234,5 @@ fi
 printf '\nSummary: %s\n' "$summary"
 if ((failures > 0)); then
   printf '%s step(s) failed; their .stderr files hold the reason.\n' "$failures" >&2
-  exit 1
+  exit 3
 fi
